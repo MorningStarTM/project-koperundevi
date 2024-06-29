@@ -17,6 +17,22 @@ n_layers = 4
 n_head = 4
 
 
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.selfAttention = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        y = self.selfAttention(x)
+        x = self.ln1(x + y)
+        y = self.ffwd(x)
+        x = self.ln2(x + y)
+        return x
+
 class GPTLanguageModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
