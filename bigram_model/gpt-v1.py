@@ -15,6 +15,21 @@ eval_iters = 10000
 n_emb = 384
 n_layers = 4
 n_head = 4
+dropout = 0.1
+
+
+class FeedForward(nn.Module):
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_emb, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 
 class Block(nn.Module):
@@ -32,6 +47,8 @@ class Block(nn.Module):
         y = self.ffwd(x)
         x = self.ln2(x + y)
         return x
+
+
 
 class GPTLanguageModel(nn.Module):
     def __init__(self, vocab_size):
