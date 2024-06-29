@@ -18,6 +18,34 @@ n_head = 4
 dropout = 0.1
 
 
+
+class Head(nn.Module):
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_emb, head_size, bias=False)
+        self.query = nn.Linear(n_emb, head_size, bias=False)
+        self.value = nn.Linear(n_emb, head_size, bias=False)
+        self.register_buffer('trill', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
+
+
+    def forward(self, x):
+        B,T,C = x.shape
+        k = self.key(x)
+        q = self.query(x)
+
+        wei = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5   # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
+
+        v = self.value(x)
+        out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
+        return out
+
+
+
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
