@@ -95,7 +95,7 @@ class GPTLanguageModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
         self.token_embeding_table = nn.Embedding(vocab_size, n_emb)
-        self.position_embedding_table = nn.Embedding(vocab_size, n_emb)
+        self.position_embedding_table = nn.Embedding(block_size, n_emb)
         self.blocks = nn.Sequential(*[Block(n_emb, n_head=n_head) for _ in range(n_layers)])
 
         self.ln_f = nn.LayerNorm(n_emb)

@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 
 import torch
+from safetensors.torch import save_file, load_file
 
 
 @dataclass
@@ -15,8 +16,14 @@ class TrainerConfig:
     learning_rate: float = 3e-4
     grad_clip: float = 1.0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    checkpoint_path: str = "../models/trained_model.pth"
+    checkpoint_dir: str = "../models"
     resume: bool = False
+
+    # Hugging Face Hub
+    push_to_hub: bool = False
+    hf_repo_id: str = "ErnestBeckham/gpt-v1"
+    hf_token: str = None  # falls back to a cached `huggingface-cli login` token / HF_TOKEN env var
+    hf_private: bool = True
 
 
 class Trainer:
@@ -29,8 +36,22 @@ class Trainer:
         self.start_iter = 0
         self.best_val_loss = float("inf")
 
-        if config.resume and os.path.exists(config.checkpoint_path):
-            self.load_checkpoint(config.checkpoint_path)
+        self.model_path = os.path.join(config.checkpoint_dir, "model.safetensors")
+        self.train_state_path = os.path.join(config.checkpoint_dir, "train_state.pt")
+
+        self._hf_api = None
+        if config.push_to_hub:
+            self._hf_api = self._init_hf_repo()
+
+        if config.resume and os.path.exists(self.model_path):
+            self.load_checkpoint()
+
+    def _init_hf_repo(self):
+        from huggingface_hub import HfApi
+
+        api = HfApi(token=self.config.hf_token)
+        api.create_repo(repo_id=self.config.hf_repo_id, private=self.config.hf_private, exist_ok=True)
+        return api
 
     def get_batch(self, split):
         data = self.train_data if split == "train" else self.val_data
@@ -54,22 +75,40 @@ class Trainer:
         self.model.train()
         return out
 
-    def save_checkpoint(self, path, iter_num, val_loss):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    def save_checkpoint(self, iter_num, val_loss):
+        os.makedirs(self.config.checkpoint_dir, exist_ok=True)
+
+        state_dict = {k: v.contiguous() for k, v in self.model.state_dict().items()}
+        save_file(state_dict, self.model_path, metadata={"iter": str(iter_num), "val_loss": str(val_loss)})
+
         torch.save({
-            "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "iter": iter_num,
             "best_val_loss": val_loss,
-        }, path)
+        }, self.train_state_path)
 
-    def load_checkpoint(self, path):
-        checkpoint = torch.load(path, map_location=self.config.device)
-        self.model.load_state_dict(checkpoint["model_state"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-        self.start_iter = checkpoint.get("iter", 0) + 1
-        self.best_val_loss = checkpoint.get("best_val_loss", float("inf"))
+        if self.config.push_to_hub:
+            self.push_checkpoint(iter_num, val_loss)
+
+    def load_checkpoint(self):
+        state_dict = load_file(self.model_path, device=self.config.device)
+        self.model.load_state_dict(state_dict)
+
+        if os.path.exists(self.train_state_path):
+            train_state = torch.load(self.train_state_path, map_location=self.config.device)
+            self.optimizer.load_state_dict(train_state["optimizer_state"])
+            self.start_iter = train_state.get("iter", 0) + 1
+            self.best_val_loss = train_state.get("best_val_loss", float("inf"))
+
         print(f"Resumed from checkpoint at iter {self.start_iter}, best val loss {self.best_val_loss:.4f}")
+
+    def push_checkpoint(self, iter_num, val_loss):
+        self._hf_api.upload_file(
+            path_or_fileobj=self.model_path,
+            path_in_repo="model.safetensors",
+            repo_id=self.config.hf_repo_id,
+            commit_message=f"checkpoint at iter {iter_num}, val loss {val_loss:.4f}",
+        )
 
     def train(self):
         cfg = self.config
@@ -84,7 +123,7 @@ class Trainer:
 
                 if losses["val"] < self.best_val_loss:
                     self.best_val_loss = losses["val"]
-                    self.save_checkpoint(cfg.checkpoint_path, iter_num, self.best_val_loss)
+                    self.save_checkpoint(iter_num, self.best_val_loss)
 
             xb, yb = self.get_batch("train")
             _, loss = self.model(xb, yb)
