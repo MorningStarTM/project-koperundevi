@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 
 from bpe import BPETokenizer
@@ -31,6 +32,20 @@ def read_sample(path, sample_bytes, seed):
     return raw.decode("utf-8", errors="ignore")
 
 
+def push_to_hub(path, repo_id, token, private):
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    api.create_repo(repo_id=repo_id, private=private, exist_ok=True)
+    api.upload_file(
+        path_or_fileobj=path,
+        path_in_repo="tokenizer.json",
+        repo_id=repo_id,
+        commit_message="Add/update BPE tokenizer",
+    )
+    print(f"Pushed tokenizer to https://huggingface.co/{repo_id}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train a byte-level BPE tokenizer.")
     parser.add_argument("--data", required=True, help="Path to the training text file.")
@@ -40,6 +55,11 @@ def main():
                          help="Bytes to sample from --data for training. 0 = use the whole file.")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--verbose", action="store_true")
+
+    parser.add_argument("--push-to-hub", action="store_true")
+    parser.add_argument("--hf-repo-id", default="ErnestBeckham/gpt-v1")
+    parser.add_argument("--hf-token", default=None, help="Falls back to the HF_TOKEN env var if omitted.")
+    parser.add_argument("--hf-private", action="store_true", default=True)
     args = parser.parse_args()
 
     print(f"Reading sample from {args.data} ...")
@@ -57,6 +77,12 @@ def main():
     print(f"Sanity check: {len(probe)} chars -> {len(ids)} tokens "
           f"({len(probe) / len(ids):.2f} chars/token), "
           f"round-trip ok: {tokenizer.decode(ids) == probe}")
+
+    if args.push_to_hub:
+        token = args.hf_token or os.environ.get("HF_TOKEN")
+        if not token:
+            raise SystemExit("--push-to-hub requires --hf-token or an HF_TOKEN env var.")
+        push_to_hub(args.output, args.hf_repo_id, token, args.hf_private)
 
 
 if __name__ == "__main__":
