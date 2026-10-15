@@ -50,7 +50,7 @@ kaggle_username = secret_from_env_or_config("KAGGLE_USERNAME", "kaggleUsername")
 kaggle_key = secret_from_env_or_config("KAGGLE_KEY", "kaggleKey")
 hf_token = secret_from_env_or_config("HF_TOKEN", "hfToken")
 
-repo_url = config.get("repoUrl") or "https://github.com/ErnestBeckham/project-koperundevi.git"
+repo_url = config.get("repoUrl") or "https://github.com/MorningStarTM/project-koperundevi.git"
 data_file = config.get("dataFile") or "data_tamil.txt"
 vocab_size = config.get_int("vocabSize") or 8000
 sample_bytes = config.get_int("sampleBytes") or 200_000_000
