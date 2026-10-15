@@ -220,6 +220,7 @@ instance = aws.ec2.Instance(
         "volume_type": "gp3",
     },
     user_data=user_data,
+    user_data_replace_on_change=True,
     tags={"Name": "tamil-bpe-trainer"},
 )
 
