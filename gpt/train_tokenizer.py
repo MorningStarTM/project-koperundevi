@@ -50,7 +50,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train a byte-level BPE tokenizer.")
     parser.add_argument("--data", required=True, help="Path to the training text file.")
     parser.add_argument("--output", required=True, help="Path to save the tokenizer JSON to.")
-    parser.add_argument("--vocab-size", type=int, default=8000)
+    parser.add_argument("--vocab-size", type=int, default=1800)
     parser.add_argument("--sample-bytes", type=int, default=200_000_000,
                          help="Bytes to sample from --data for training. 0 = use the whole file.")
     parser.add_argument("--seed", type=int, default=1337)
