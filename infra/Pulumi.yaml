@@ -1,3 +1,6 @@
 name: tamil-bpe-training
-runtime: python
-description: EC2 instance that pulls a dataset from Kaggle, trains the BPE tokenizer, and pushes it to Hugging Face Hub.
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: EC2 instance that pulls a dataset from the HF dataset repo, trains the BPE tokenizer, and pushes it to Hugging Face Hub.
