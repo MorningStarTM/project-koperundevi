@@ -2,9 +2,13 @@
 Phase 2 -- provision with Pulumi.
 
 Provisions a single CPU EC2 instance that:
+  STEP 0. installs Prometheus + Grafana, scraping gpt/metrics.py's endpoint,
   STEP 1. pulls data/literature.txt from the HF dataset repo (no Kaggle),
-  STEP 2. trains the byte-level BPE tokenizer on it (gpt/train_tokenizer.py),
-  STEP 3. pushes the resulting tokenizer.json to Hugging Face Hub.
+  STEP 2. downloads the already-trained tokenizer.json from ErnestBeckham/gpt-v1
+          (the tokenizer itself was trained and pushed locally -- not here).
+
+Training (gpt/run_train.sh) is NOT auto-started by this script -- SSH in and
+run it by hand, same as you did locally, once the instance is up.
 
 The HF token is stored in SSM Parameter Store as a SecureString and fetched
 by the instance at boot via its IAM role -- it is never baked into the EC2
@@ -17,7 +21,7 @@ Still required via `pulumi config set` (deployment settings, not secrets):
   sshCidr        CIDR allowed to SSH in, e.g. "203.0.113.4/32"
 
 Optional config (sensible defaults below):
-  repoUrl, hfDatasetRepo, dataFile, vocabSize, sampleBytes, hfRepoId,
+  repoUrl, hfDatasetRepo, dataFile, hfRepoId, tokenizerFilename,
   instanceType, volumeSizeGb
 """
 
@@ -46,13 +50,9 @@ hf_token = secret_from_env_or_config("HF_TOKEN", "hfToken")
 repo_url = config.get("repoUrl") or "https://github.com/MorningStarTM/project-koperundevi.git"
 hf_dataset_repo = config.get("hfDatasetRepo") or "ErnestBeckham/tamil-literature"
 data_file = config.get("dataFile") or "literature.txt"
-vocab_size = config.get_int("vocabSize") or 1800
-sample_bytes = config.get_int("sampleBytes") or 200_000_000
 hf_repo_id = config.get("hfRepoId") or "ErnestBeckham/gpt-v1"
+tokenizer_filename = config.get("tokenizerFilename") or "tokenizer_literature.json"
 
-# BPE training here is single-threaded, so this is a "pick fast single-core
-# clock speed" choice, not a "pick many vCPUs" one -- extra cores sit idle
-# until the tokenizer gets a multiprocessing rewrite.
 instance_type = config.get("instanceType") or "c7i.2xlarge"
 volume_size_gb = config.get_int("volumeSizeGb") or 150
 ubuntu_version = config.get("ubuntuVersion") or "jammy-22.04"
@@ -154,14 +154,41 @@ ubuntu_ami = aws.ec2.get_ami(
 )
 
 # --- block 4: bootstrap script, run once at boot -------------------------
-# STEP 1 (data) -> STEP 2 (train tokenizer) -> STEP 3 (push to hub)
+# STEP 0 (dashboard stack) -> STEP 1 (data) -> STEP 2 (tokenizer download)
+# Training itself (run_train.sh) is NOT auto-started here -- you SSH in and
+# kick it off by hand, same as locally, so nothing runs (and nothing is
+# billed for GPU-less CPU time) without you choosing to start it.
 
 user_data = f"""#!/bin/bash
 set -euxo pipefail
 exec > /var/log/bpe-bootstrap.log 2>&1
 
 apt-get update -y
-apt-get install -y python3-pip python3-venv git awscli
+apt-get install -y python3-pip python3-venv git awscli prometheus
+
+# STEP 0: Grafana (not in Ubuntu's default repos) + a scrape config pointing
+# at the trainer's /metrics endpoint, same setup as the local one.
+apt-get install -y apt-transport-https software-properties-common wget
+wget -q -O /usr/share/keyrings/grafana.key https://apt.grafana.com/gpg.key
+echo "deb [signed-by=/usr/share/keyrings/grafana.key] https://apt.grafana.com stable main" \\
+  > /etc/apt/sources.list.d/grafana.list
+apt-get update -y
+apt-get install -y grafana
+
+cat > /etc/prometheus/prometheus.yml <<'PROM_EOF'
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  - job_name: tamil-gpt-training
+    static_configs:
+      - targets: ["localhost:8000"]
+PROM_EOF
+
+systemctl enable --now prometheus
+systemctl enable --now grafana-server
 
 REGION="$(curl -s http://169.254.169.254/latest/meta-data/placement/region)"
 HF_TOKEN=$(aws ssm get-parameter --name "{ssm_prefix}/hf-token" --with-decryption --query Parameter.Value --output text --region "$REGION")
@@ -174,6 +201,7 @@ python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements-tokenizer.txt
+pip install -r requirements.txt
 
 # STEP 1: pull the dataset from the HF dataset repo (not Kaggle)
 mkdir -p data
@@ -184,17 +212,17 @@ path = hf_hub_download(repo_id='{hf_dataset_repo}', repo_type='dataset', filenam
 shutil.copy(path, 'data/{data_file}')
 "
 
-# STEP 2 + STEP 3: train the tokenizer, then push it to the hub
-cd gpt
-HF_TOKEN="$HF_TOKEN" python3 train_tokenizer.py \\
-  --data ../data/{data_file} \\
-  --output ../models/tokenizer.json \\
-  --vocab-size {vocab_size} \\
-  --sample-bytes {sample_bytes} \\
-  --push-to-hub \\
-  --hf-repo-id {hf_repo_id}
+# STEP 2: the tokenizer is already trained and pushed (ErnestBeckham/gpt-v1)
+# -- download it rather than retraining it from scratch.
+mkdir -p models
+HF_TOKEN="$HF_TOKEN" python3 -c "
+from huggingface_hub import hf_hub_download
+import shutil
+path = hf_hub_download(repo_id='{hf_repo_id}', filename='{tokenizer_filename}')
+shutil.copy(path, 'models/{tokenizer_filename}')
+"
 
-echo "data pull + tokenizer training + push to hub complete" > /root/DONE
+echo "dashboard stack + data pull + tokenizer download complete -- SSH in and run gpt/run_train.sh when ready" > /root/DONE
 """
 
 # --- block 5: the instance itself, plus outputs ---------------------------
