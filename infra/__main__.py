@@ -1,16 +1,15 @@
 """
-Provisions a single EC2 instance that:
-  1. pulls a dataset directly from Kaggle (no local download needed),
-  2. trains the byte-level BPE tokenizer on it (gpt/train_tokenizer.py),
-  3. pushes the resulting tokenizer.json to Hugging Face Hub.
+Phase 2 -- provision with Pulumi.
 
-Secrets (Kaggle creds, HF token) are stored in SSM Parameter Store as
-SecureString and fetched by the instance at boot via its IAM role -- they
-are never baked into the EC2 user_data in plaintext.
+Provisions a single CPU EC2 instance that:
+  STEP 1. pulls data/literature.txt from the HF dataset repo (no Kaggle),
+  STEP 2. trains the byte-level BPE tokenizer on it (gpt/train_tokenizer.py),
+  STEP 3. pushes the resulting tokenizer.json to Hugging Face Hub.
 
-Credentials (HF_TOKEN, KAGGLE_KEY, KAGGLE_USERNAME, KAGGLE_DATASET) are read
-from a .env file at the repo root if present, falling back to
-`pulumi config set [--secret] <key> <value>` otherwise.
+The HF token is stored in SSM Parameter Store as a SecureString and fetched
+by the instance at boot via its IAM role -- it is never baked into the EC2
+user_data in plaintext. Read from a .env file at the repo root if present,
+falling back to `pulumi config set --secret hfToken <value>` otherwise.
 
 Still required via `pulumi config set` (deployment settings, not secrets):
   aws:region    e.g. ap-south-1
@@ -18,7 +17,7 @@ Still required via `pulumi config set` (deployment settings, not secrets):
   sshCidr        CIDR allowed to SSH in, e.g. "203.0.113.4/32"
 
 Optional config (sensible defaults below):
-  repoUrl, dataFile, vocabSize, sampleBytes, hfRepoId,
+  repoUrl, hfDatasetRepo, dataFile, vocabSize, sampleBytes, hfRepoId,
   instanceType, volumeSizeGb
 """
 
@@ -38,21 +37,16 @@ def secret_from_env_or_config(env_key, config_key):
     return pulumi.Output.secret(value) if value else config.require_secret(config_key)
 
 
-def value_from_env_or_config(env_key, config_key):
-    return os.environ.get(env_key) or config.require(config_key)
-
+# --- config: deployment settings + secrets ------------------------------
 
 key_name = config.require("keyName")
 ssh_cidr = config.require("sshCidr")
-kaggle_dataset = value_from_env_or_config("KAGGLE_DATASET", "kaggleDataset")
-
-kaggle_username = secret_from_env_or_config("KAGGLE_USERNAME", "kaggleUsername")
-kaggle_key = secret_from_env_or_config("KAGGLE_KEY", "kaggleKey")
 hf_token = secret_from_env_or_config("HF_TOKEN", "hfToken")
 
 repo_url = config.get("repoUrl") or "https://github.com/MorningStarTM/project-koperundevi.git"
-data_file = config.get("dataFile") or "data_tamil.txt"
-vocab_size = config.get_int("vocabSize") or 8000
+hf_dataset_repo = config.get("hfDatasetRepo") or "ErnestBeckham/tamil-literature"
+data_file = config.get("dataFile") or "literature.txt"
+vocab_size = config.get_int("vocabSize") or 1800
 sample_bytes = config.get_int("sampleBytes") or 200_000_000
 hf_repo_id = config.get("hfRepoId") or "ErnestBeckham/gpt-v1"
 
@@ -61,24 +55,13 @@ hf_repo_id = config.get("hfRepoId") or "ErnestBeckham/gpt-v1"
 # until the tokenizer gets a multiprocessing rewrite.
 instance_type = config.get("instanceType") or "c7i.2xlarge"
 volume_size_gb = config.get_int("volumeSizeGb") or 150
+ubuntu_version = config.get("ubuntuVersion") or "jammy-22.04"
 
-ssm_prefix = "/tamil-bpe"
+stack_name = pulumi.get_stack()
+ssm_prefix = f"/tamil-bpe/{stack_name}"
+resource_name_tag = f"tamil-bpe-trainer-{stack_name}"
 
-# --- secrets in SSM Parameter Store -----------------------------------
-
-kaggle_username_param = aws.ssm.Parameter(
-    "kaggle-username",
-    name=f"{ssm_prefix}/kaggle-username",
-    type="SecureString",
-    value=kaggle_username,
-)
-
-kaggle_key_param = aws.ssm.Parameter(
-    "kaggle-key",
-    name=f"{ssm_prefix}/kaggle-key",
-    type="SecureString",
-    value=kaggle_key,
-)
+# --- block 1: secret in SSM Parameter Store -----------------------------
 
 hf_token_param = aws.ssm.Parameter(
     "hf-token",
@@ -87,7 +70,7 @@ hf_token_param = aws.ssm.Parameter(
     value=hf_token,
 )
 
-# --- IAM role: instance can only read the three parameters above -------
+# --- block 2: IAM role, scoped to read only the parameter above --------
 
 region = aws.get_region().name
 account_id = aws.get_caller_identity().account_id
@@ -102,6 +85,14 @@ assume_role_policy = aws.iam.get_policy_document(
 role = aws.iam.Role(
     "bpe-trainer-role",
     assume_role_policy=assume_role_policy.json,
+)
+
+# Lets us shell in via `aws ssm start-session` instead of SSH -- no inbound
+# port, no IP allowlist, works regardless of the client's (unstable) public IP.
+ssm_core_attachment = aws.iam.RolePolicyAttachment(
+    "bpe-trainer-ssm-core",
+    role=role.name,
+    policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
 )
 
 ssm_read_policy = aws.iam.RolePolicy(
@@ -134,7 +125,7 @@ instance_profile = aws.iam.InstanceProfile(
     role=role.name,
 )
 
-# --- networking ---------------------------------------------------------
+# --- block 3: networking -------------------------------------------------
 
 security_group = aws.ec2.SecurityGroup(
     "bpe-trainer-sg",
@@ -157,12 +148,13 @@ ubuntu_ami = aws.ec2.get_ami(
     most_recent=True,
     owners=["099720109477"],  # Canonical
     filters=[
-        {"name": "name", "values": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]},
+        {"name": "name", "values": [f"ubuntu/images/hvm-ssd/ubuntu-{ubuntu_version}-amd64-server-*"]},
         {"name": "virtualization-type", "values": ["hvm"]},
     ],
 )
 
-# --- bootstrap script -----------------------------------------------------
+# --- block 4: bootstrap script, run once at boot -------------------------
+# STEP 1 (data) -> STEP 2 (train tokenizer) -> STEP 3 (push to hub)
 
 user_data = f"""#!/bin/bash
 set -euxo pipefail
@@ -172,16 +164,7 @@ apt-get update -y
 apt-get install -y python3-pip python3-venv git awscli
 
 REGION="$(curl -s http://169.254.169.254/latest/meta-data/placement/region)"
-
-KAGGLE_USERNAME=$(aws ssm get-parameter --name "{ssm_prefix}/kaggle-username" --with-decryption --query Parameter.Value --output text --region "$REGION")
-KAGGLE_KEY=$(aws ssm get-parameter --name "{ssm_prefix}/kaggle-key" --with-decryption --query Parameter.Value --output text --region "$REGION")
 HF_TOKEN=$(aws ssm get-parameter --name "{ssm_prefix}/hf-token" --with-decryption --query Parameter.Value --output text --region "$REGION")
-
-mkdir -p /root/.kaggle
-cat > /root/.kaggle/kaggle.json <<KAGGLE_EOF
-{{"username":"$KAGGLE_USERNAME","key":"$KAGGLE_KEY"}}
-KAGGLE_EOF
-chmod 600 /root/.kaggle/kaggle.json
 
 cd /root
 git clone {repo_url} project
@@ -192,9 +175,16 @@ source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements-tokenizer.txt
 
+# STEP 1: pull the dataset from the HF dataset repo (not Kaggle)
 mkdir -p data
-kaggle datasets download -d {kaggle_dataset} -p data --unzip
+HF_TOKEN="$HF_TOKEN" python3 -c "
+from huggingface_hub import hf_hub_download
+import shutil
+path = hf_hub_download(repo_id='{hf_dataset_repo}', repo_type='dataset', filename='{data_file}')
+shutil.copy(path, 'data/{data_file}')
+"
 
+# STEP 2 + STEP 3: train the tokenizer, then push it to the hub
 cd gpt
 HF_TOKEN="$HF_TOKEN" python3 train_tokenizer.py \\
   --data ../data/{data_file} \\
@@ -204,8 +194,10 @@ HF_TOKEN="$HF_TOKEN" python3 train_tokenizer.py \\
   --push-to-hub \\
   --hf-repo-id {hf_repo_id}
 
-echo "BPE training + push to hub complete" > /root/DONE
+echo "data pull + tokenizer training + push to hub complete" > /root/DONE
 """
+
+# --- block 5: the instance itself, plus outputs ---------------------------
 
 instance = aws.ec2.Instance(
     "bpe-trainer",
@@ -221,10 +213,19 @@ instance = aws.ec2.Instance(
     },
     user_data=user_data,
     user_data_replace_on_change=True,
-    tags={"Name": "tamil-bpe-trainer"},
+    tags={"Name": resource_name_tag, "Stack": stack_name},
 )
 
 pulumi.export("instance_id", instance.id)
 pulumi.export("public_ip", instance.public_ip)
-pulumi.export("ssh", pulumi.Output.concat("ssh -i <your-key>.pem ubuntu@", instance.public_ip))
-pulumi.export("bootstrap_log", pulumi.Output.concat("ssh ... 'tail -f /var/log/bpe-bootstrap.log'"))
+pulumi.export(
+    "ssh",
+    pulumi.Output.concat("ssh -i ../deploy/", key_name, ".pem ubuntu@", instance.public_ip),
+)
+pulumi.export(
+    "bootstrap_log",
+    pulumi.Output.concat(
+        "ssh -i ../deploy/", key_name, ".pem ubuntu@", instance.public_ip,
+        " 'tail -f /var/log/bpe-bootstrap.log'",
+    ),
+)
