@@ -5,6 +5,15 @@
 #   2+ GPUs -> torchrun, one process per GPU, DDP (see gpt/trainer.py is_ddp())
 set -eu
 
+# Activate the project venv if one exists one directory up (where the boot
+# script / local setup creates it) -- so you never need to remember this
+# step yourself before running training.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/../venv/bin/activate" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/../venv/bin/activate"
+fi
+
 GPU_COUNT=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 0)
 
 if [ "$GPU_COUNT" -ge 2 ]; then
