@@ -1,11 +1,12 @@
 import argparse
+import os
 import time
 
 import torch
 
 import gpt_v1
 from bpe import BPETokenizer
-from trainer import Trainer, TrainerConfig
+from trainer import Trainer, TrainerConfig, resolve_device
 
 
 def read_text(path, max_chars):
@@ -69,8 +70,16 @@ def main():
 
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device: {device}")
+    # Phase 3: under torchrun this is this process's own GPU (cuda:LOCAL_RANK),
+    # not just "cuda" -- otherwise every rank would land on GPU 0.
+    device = resolve_device()
+    # Every rank re-tokenizes/re-encodes its own copy of the (small) dataset
+    # independently -- simplest option at this data size. Gate prints on
+    # rank 0 so torchrun's output stays readable.
+    is_main = os.environ.get("RANK", "0") == "0"
+
+    if is_main:
+        print(f"device: {device}")
 
     gpt_v1.device = device
     gpt_v1.block_size = args.block_size
@@ -79,27 +88,21 @@ def main():
     gpt_v1.n_head = args.n_head
     gpt_v1.dropout = args.dropout
 
-    print(f"Loading tokenizer from {args.tokenizer} ...")
     tokenizer = BPETokenizer()
     tokenizer.load(args.tokenizer)
-    print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
 
-    print(f"Reading data from {args.data} ...")
     text = read_text(args.data, args.max_chars)
-    print(f"Read {len(text):,} characters.")
-
-    print("Encoding data ...")
-    ids = encode_with_progress(tokenizer, text)
+    ids = encode_with_progress(tokenizer, text) if is_main else tokenizer.encode(text)
     data = torch.tensor(ids, dtype=torch.long)
-    print(f"Encoded into {len(data):,} tokens.")
 
     n = int((1 - args.val_fraction) * len(data))
     train_data, val_data = data[:n], data[n:]
-    print(f"train tokens: {len(train_data):,}, val tokens: {len(val_data):,}")
 
     model = gpt_v1.GPTLanguageModel(vocab_size=tokenizer.vocab_size)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {total_params:,}")
+    if is_main:
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Tokenizer vocab size: {tokenizer.vocab_size}, train tokens: {len(train_data):,}, "
+              f"val tokens: {len(val_data):,}, model parameters: {total_params:,}")
 
     config = TrainerConfig(
         max_iters=args.max_iters,
