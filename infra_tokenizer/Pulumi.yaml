@@ -1,0 +1,6 @@
+name: tamil-bpe-vocab-sweep
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: EC2 instance that trains one BPE tokenizer (vocab size set per stack) on data_tamil.txt from Kaggle, and pushes it to Hugging Face Hub under a vocab-size-specific filename.
