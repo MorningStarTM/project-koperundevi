@@ -1,3 +1,4 @@
 regex
 huggingface_hub
 python-dotenv
+tqdm

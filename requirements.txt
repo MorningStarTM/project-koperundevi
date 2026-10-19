@@ -5,3 +5,4 @@ huggingface_hub
 regex
 python-dotenv
 prometheus-client
+tqdm
