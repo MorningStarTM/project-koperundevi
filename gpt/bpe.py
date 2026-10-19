@@ -1,6 +1,7 @@
 import json
 import os
 import regex as re
+from tqdm import tqdm
 
 
 # GPT-2 style text splitting pattern so merges don't cross word/whitespace/number
@@ -47,7 +48,8 @@ class BPETokenizer:
         merges = {}
         vocab = {i: bytes([i]) for i in range(256)}
 
-        for i in range(num_merges):
+        progress = tqdm(range(num_merges), desc="Training BPE", unit="merge")
+        for i in progress:
             stats = {}
             for chunk_ids in ids:
                 get_stats(chunk_ids, stats)
@@ -61,6 +63,8 @@ class BPETokenizer:
 
             merges[pair] = idx
             vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
+
+            progress.set_postfix(pair=pair, occurrences=stats[pair])
 
             if verbose:
                 print(f"merge {i + 1}/{num_merges}: {pair} -> {idx} "

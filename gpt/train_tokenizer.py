@@ -32,18 +32,18 @@ def read_sample(path, sample_bytes, seed):
     return raw.decode("utf-8", errors="ignore")
 
 
-def push_to_hub(path, repo_id, token, private):
+def push_to_hub(path, repo_id, token, private, path_in_repo):
     from huggingface_hub import HfApi
 
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, private=private, exist_ok=True)
     api.upload_file(
         path_or_fileobj=path,
-        path_in_repo="tokenizer.json",
+        path_in_repo=path_in_repo,
         repo_id=repo_id,
-        commit_message="Add/update BPE tokenizer",
+        commit_message=f"Add/update BPE tokenizer ({path_in_repo})",
     )
-    print(f"Pushed tokenizer to https://huggingface.co/{repo_id}")
+    print(f"Pushed tokenizer to https://huggingface.co/{repo_id}/blob/main/{path_in_repo}")
 
 
 def main():
@@ -60,6 +60,9 @@ def main():
     parser.add_argument("--hf-repo-id", default="ErnestBeckham/gpt-v1")
     parser.add_argument("--hf-token", default=None, help="Falls back to the HF_TOKEN env var if omitted.")
     parser.add_argument("--hf-private", action="store_true", default=True)
+    parser.add_argument("--hf-filename", default=None,
+                         help="Path in the HF repo to upload to. Defaults to the basename of --output, "
+                              "so e.g. --output ../models/tokenizer_8000.json uploads as tokenizer_8000.json.")
     args = parser.parse_args()
 
     print(f"Reading sample from {args.data} ...")
@@ -82,7 +85,8 @@ def main():
         token = args.hf_token or os.environ.get("HF_TOKEN")
         if not token:
             raise SystemExit("--push-to-hub requires --hf-token or an HF_TOKEN env var.")
-        push_to_hub(args.output, args.hf_repo_id, token, args.hf_private)
+        hf_filename = args.hf_filename or os.path.basename(args.output)
+        push_to_hub(args.output, args.hf_repo_id, token, args.hf_private, hf_filename)
 
 
 if __name__ == "__main__":
